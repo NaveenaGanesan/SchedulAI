@@ -1,0 +1,119 @@
+# ===== Sensitive Credentials =====
+# Google OAuth credentials
+credentials.json
+token.pickle
+*.pickle
+
+# Environment variables
+.env
+.env.local
+.env.production
+
+# OpenAI API keys and configs
+openai_config.json
+
+# ===== Python =====
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# ===== Virtual Environments =====
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+.venv/
+
+# ===== IDEs and Editors =====
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ===== Jupyter Notebooks =====
+.ipynb_checkpoints
+
+# ===== Testing =====
+.coverage
+.pytest_cache/
+.tox/
+htmlcov/
+.nox/
+
+# ===== Logs =====
+*.log
+logs/
+*.log.*
+
+# ===== OS Generated =====
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# ===== Temporary Files =====
+tmp/
+temp/
+*.tmp
+*.temp
+
+# ===== Database =====
+*.db
+*.sqlite
+*.sqlite3
+
+# ===== Cache =====
+.cache/
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# ===== Streamlit =====
+.streamlit/
+
+# ===== FastAPI =====
+.alembic/
+
+# ===== Documentation =====
+docs/_build/
+
+# ===== Package Files =====
+*.tar.gz
+*.zip
+
+# ===== Local Development =====
+local_settings.py
+.local
+.vscode/settings.json
+
+# ===== Test Data =====
+test_data/
+sample_data/
+
+# ===== Backup Files =====
+*.bak
+*.backup 
