@@ -16,7 +16,7 @@ from app.core.logging import get_logger
 logger = get_logger(__name__)
 
 class SchedulingAgent:
-    """AI Agent that uses OpenAI function calling for meeting scheduling with multi-user support"""
+    """AI Agent that uses OpenAI function calling for meeting scheduling"""
     
     def __init__(self):
         logger.info("Initializing SchedulAI Agent...")
@@ -29,7 +29,7 @@ class SchedulingAgent:
         logger.debug("Setting up OpenAI client...")
         self.client = openai.OpenAI(api_key=config.OPENAI_API_KEY)
         
-        # Initialize Google service with multi-user support
+        # Initialize Google service
         logger.debug("Setting up Google services...")
         self.google_service = GoogleService()
         
@@ -45,32 +45,20 @@ class SchedulingAgent:
         logger.debug(f"Available tools: {[tool['function']['name'] for tool in self.tools]}")
     
     def _define_tools(self) -> List[Dict[str, Any]]:
-        """Define OpenAI function calling tools with multi-user support"""
+        """Define OpenAI function calling tools"""
         return [
             {
                 "type": "function",
                 "function": {
-                    "name": "get_authenticated_users",
-                    "description": "Get list of all authenticated users who can access their calendars",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {},
-                        "required": []
-                    }
-                }
-            },
-            {
-                "type": "function", 
-                "function": {
                     "name": "get_calendar_availability",
-                    "description": "Get calendar availability for participants. Only authenticated users will show real availability data.",
+                    "description": "Get calendar availability for participants in a date range",
                     "parameters": {
                         "type": "object",
                         "properties": {
                             "participant_emails": {
                                 "type": "array",
                                 "items": {"type": "string"},
-                                "description": "List of participant email addresses (mix of authenticated and external users allowed)"
+                                "description": "List of participant email addresses"
                             },
                             "start_date": {
                                 "type": "string",
@@ -165,7 +153,7 @@ class SchedulingAgent:
                 "type": "function",
                 "function": {
                     "name": "create_calendar_event",
-                    "description": "Create a calendar event for confirmed meeting. Specify which authenticated user should create the event.",
+                    "description": "Create a calendar event for confirmed meeting",
                     "parameters": {
                         "type": "object",
                         "properties": {
@@ -178,13 +166,9 @@ class SchedulingAgent:
                                 "items": {"type": "string"},
                                 "description": "Attendee email addresses"
                             },
-                            "location": {"type": "string", "description": "Meeting location"},
-                            "organizer_email": {
-                                "type": "string", 
-                                "description": "Email of authenticated user who should create the event (usually the meeting organizer)"
-                            }
+                            "location": {"type": "string", "description": "Meeting location"}
                         },
-                        "required": ["title", "start_time", "end_time", "attendees", "organizer_email"]
+                        "required": ["title", "start_time", "end_time", "attendees"]
                     }
                 }
             },
@@ -192,7 +176,7 @@ class SchedulingAgent:
                 "type": "function",
                 "function": {
                     "name": "send_meeting_email",
-                    "description": "Send meeting proposal or confirmation email from a specific authenticated user",
+                    "description": "Send meeting proposal or confirmation email",
                     "parameters": {
                         "type": "object",
                         "properties": {
@@ -208,13 +192,9 @@ class SchedulingAgent:
                                 "type": "string",
                                 "enum": ["proposal", "confirmation", "cancellation", "reminder"],
                                 "description": "Type of email being sent"
-                            },
-                            "sender_email": {
-                                "type": "string",
-                                "description": "Email of authenticated user who should send the email (usually the meeting organizer)"
                             }
                         },
-                        "required": ["to", "subject", "body", "email_type", "sender_email"]
+                        "required": ["to", "subject", "body", "email_type"]
                     }
                 }
             },
@@ -222,19 +202,15 @@ class SchedulingAgent:
                 "type": "function",
                 "function": {
                     "name": "check_email_responses",
-                    "description": "Check for email responses related to meeting proposals from a specific authenticated user's inbox",
+                    "description": "Check for email responses related to meeting proposals",
                     "parameters": {
                         "type": "object",
                         "properties": {
                             "proposal_id": {"type": "string", "description": "Meeting proposal ID"},
                             "query": {"type": "string", "description": "Search query for emails"},
-                            "max_results": {"type": "integer", "default": 10},
-                            "user_email": {
-                                "type": "string",
-                                "description": "Email of authenticated user whose inbox to check"
-                            }
+                            "max_results": {"type": "integer", "default": 10}
                         },
-                        "required": ["proposal_id", "user_email"]
+                        "required": ["proposal_id"]
                     }
                 }
             }
@@ -243,7 +219,6 @@ class SchedulingAgent:
     def _define_tool_functions(self) -> Dict[str, Callable]:
         """Map tool names to actual function implementations"""
         return {
-            "get_authenticated_users": self._get_authenticated_users,
             "get_calendar_availability": self._get_calendar_availability,
             "analyze_optimal_slots": self._analyze_optimal_slots,
             "create_calendar_event": self._create_calendar_event,
@@ -290,32 +265,24 @@ class SchedulingAgent:
     
     def _process_agent_response(self, response, proposal_id: str, 
                                 meeting_request: MeetingRequest) -> Dict[str, Any]:
-        """Process agent response and execute tool calls"""
-        message = response.choices[0].message
+        """Process the agent's response and execute any tool calls"""
         
-        if not message.tool_calls:
+        assistant_message = response.choices[0].message
+        tool_calls = assistant_message.tool_calls
+        
+        if not tool_calls:
+            # No tools called, just return the message
             return {
-                "success": True,
-                "agent_response": message.content,
-                "proposal_id": proposal_id,
-                "tool_calls": []
+                "success": False,
+                "error": "Agent didn't call any tools to schedule the meeting",
+                "message": assistant_message.content
             }
         
-        # Prepare messages for tool execution
+        # Execute tool calls
         messages = [
-            {"role": "assistant", "content": message.content or "", "tool_calls": [
-                {
-                    "id": tool_call.id,
-                    "type": "function",
-                    "function": {
-                        "name": tool_call.function.name,
-                        "arguments": tool_call.function.arguments
-                    }
-                } for tool_call in message.tool_calls
-            ]}
+            {"role": "assistant", "content": assistant_message.content, "tool_calls": tool_calls}
         ]
         
-        tool_calls = message.tool_calls
         suggested_slots = []
         reasoning = ""
         
@@ -354,9 +321,9 @@ class SchedulingAgent:
             temperature=0.3
         )
         
-        # Create meeting proposal
+        # Create and store proposal
         if suggested_slots:
-            # Convert string slots to TimeSlot objects
+            # Convert slot dictionaries to TimeSlot objects
             time_slots = []
             for slot in suggested_slots:
                 time_slots.append(TimeSlot(
@@ -370,67 +337,51 @@ class SchedulingAgent:
                 meeting_request=meeting_request,
                 suggested_slots=time_slots,
                 reasoning=reasoning,
-                status="pending"
+                confidence_scores=[0.9] * len(time_slots)  # Placeholder
             )
             
             self.proposals[proposal_id] = proposal
-        
-        return {
-            "success": True,
-            "agent_response": final_response.choices[0].message.content,
-            "proposal_id": proposal_id,
-            "suggested_slots": suggested_slots,
-            "reasoning": reasoning,
-            "tool_calls": [
-                {
-                    "function": tool_call.function.name,
-                    "arguments": json.loads(tool_call.function.arguments)
-                } for tool_call in tool_calls
-            ]
-        }
-    
-    # Tool function implementations with multi-user support
-    def _get_authenticated_users(self) -> Dict[str, Any]:
-        """Get list of all authenticated users"""
-        try:
-            authenticated_users = self.google_service.get_authenticated_users()
-            current_user = self.google_service.get_authenticated_email()
             
             return {
                 "success": True,
-                "authenticated_users": authenticated_users,
-                "current_user": current_user,
-                "total_count": len(authenticated_users),
-                "message": f"Found {len(authenticated_users)} authenticated users"
+                "proposal_id": proposal_id,
+                "suggested_slots": [
+                    {
+                        "index": i,
+                        "start_time": slot.start_time.isoformat(),
+                        "end_time": slot.end_time.isoformat(),
+                        "formatted": f"{slot.start_time.strftime('%A, %B %d at %I:%M %p')} - {slot.end_time.strftime('%I:%M %p')}"
+                    }
+                    for i, slot in enumerate(time_slots)
+                ],
+                "reasoning": reasoning,
+                "agent_message": final_response.choices[0].message.content
             }
-        except Exception as e:
-            return {"success": False, "error": str(e)}
+        else:
+            return {
+                "success": False,
+                "error": "No suitable meeting slots found",
+                "agent_message": final_response.choices[0].message.content
+            }
     
+    # Tool function implementations
     def _get_calendar_availability(self, participant_emails: List[str], 
                                    start_date: str, end_date: str, 
                                    duration_minutes: int) -> Dict[str, Any]:
-        """Get calendar availability for participants with multi-user access control"""
+        """Get calendar availability for participants"""
         try:
             start_dt = datetime.fromisoformat(start_date)
             end_dt = datetime.fromisoformat(end_date)
-            
-            # Get access control information
-            authenticated_users = self.google_service.get_authenticated_users()
-            access_report = self.google_service.auth_manager.validate_access(participant_emails)
-            
-            logger.info(f"Multi-user availability check - Accessible: {access_report['accessible_users']}, Denied: {access_report['denied_users']}")
             
             availability_responses = self.google_service.get_calendar_availability(
                 participant_emails, start_dt, end_dt
             )
             
-            # Convert to JSON-serializable format with access control info
+            # Convert to JSON-serializable format
             result = []
             for response in availability_responses:
-                is_authenticated = response.participant_email in access_report['accessible_users']
                 result.append({
                     "participant_email": response.participant_email,
-                    "is_authenticated": is_authenticated,
                     "free_slots": [
                         {
                             "start_time": slot.start_time.isoformat(),
@@ -449,162 +400,115 @@ class SchedulingAgent:
                     ]
                 })
             
-            return {
-                "availability_data": result, 
-                "success": True,
-                "access_control": access_report,
-                "authenticated_users": authenticated_users
-            }
+            return {"availability_data": result, "success": True}
             
         except Exception as e:
             return {"error": str(e), "success": False}
     
     def _analyze_optimal_slots(self, availability_data: List[Dict], 
-                               meeting_requirements: Dict, max_suggestions: int = 3) -> Dict[str, Any]:
-        """Analyze availability data and suggest optimal meeting slots"""
+                               meeting_requirements: Dict[str, Any],
+                               max_suggestions: int = 3) -> Dict[str, Any]:
+        """Analyze availability and suggest optimal slots"""
         try:
-            duration_minutes = meeting_requirements["duration_minutes"]
-            priority = meeting_requirements.get("priority", "medium")
-            user_prefs = meeting_requirements.get("user_preferences", {})
+            # Find common free slots across all participants
+            if not availability_data:
+                return {"suggested_slots": [], "reasoning": "No availability data provided"}
             
-            work_start = user_prefs.get("work_start_hour", 9)
-            work_end = user_prefs.get("work_end_hour", 17)
-            buffer_time = user_prefs.get("buffer_time_minutes", 15)
+            # Get first participant's free slots as starting point
+            common_slots = availability_data[0]["free_slots"]
             
-            # Find common free slots among all participants
-            common_slots = []
-            
-            # Get authenticated participants only (they have real availability data)
-            authenticated_participants = [
-                participant for participant in availability_data 
-                if participant.get("is_authenticated", False) and participant["free_slots"]
-            ]
-            
-            if not authenticated_participants:
-                return {
-                    "success": False,
-                    "error": "No authenticated participants with availability data found",
-                    "suggested_slots": [],
-                    "reasoning": "Cannot suggest meeting times without access to participant calendars. Please ensure participants are authenticated."
-                }
-            
-            # Start with first authenticated participant's free slots
-            base_participant = authenticated_participants[0]
-            for slot in base_participant["free_slots"]:
-                slot_start = datetime.fromisoformat(slot["start_time"])
-                slot_end = datetime.fromisoformat(slot["end_time"])
+            # Find intersection with other participants
+            for participant_data in availability_data[1:]:
+                participant_slots = participant_data["free_slots"]
+                new_common_slots = []
                 
-                # Check if slot is within work hours
-                if slot_start.hour < work_start or slot_end.hour > work_end:
-                    continue
-                
-                # Check if slot is long enough
-                if slot["duration_minutes"] < duration_minutes:
-                    continue
-                
-                # Check if this slot works for all other authenticated participants
-                works_for_all = True
-                for other_participant in authenticated_participants[1:]:
-                    participant_free = False
-                    for other_slot in other_participant["free_slots"]:
-                        other_start = datetime.fromisoformat(other_slot["start_time"])
-                        other_end = datetime.fromisoformat(other_slot["end_time"])
-                        
+                for common_slot in common_slots:
+                    for participant_slot in participant_slots:
                         # Check for overlap
-                        if (slot_start >= other_start and slot_start + timedelta(minutes=duration_minutes) <= other_end):
-                            participant_free = True
-                            break
-                    
-                    if not participant_free:
-                        works_for_all = False
-                        break
+                        overlap_start = max(
+                            datetime.fromisoformat(common_slot["start_time"]),
+                            datetime.fromisoformat(participant_slot["start_time"])
+                        )
+                        overlap_end = min(
+                            datetime.fromisoformat(common_slot["end_time"]),
+                            datetime.fromisoformat(participant_slot["end_time"])
+                        )
+                        
+                        if overlap_start < overlap_end:
+                            overlap_duration = (overlap_end - overlap_start).total_seconds() / 60
+                            required_duration = meeting_requirements.get("duration_minutes", 30)
+                            
+                            if overlap_duration >= required_duration:
+                                new_common_slots.append({
+                                    "start_time": overlap_start.isoformat(),
+                                    "end_time": (overlap_start + timedelta(minutes=required_duration)).isoformat(),
+                                    "duration_minutes": required_duration
+                                })
                 
-                if works_for_all:
-                    # Calculate meeting end time
-                    meeting_end = slot_start + timedelta(minutes=duration_minutes)
-                    
-                    common_slots.append({
-                        "start_time": slot_start.isoformat(),
-                        "end_time": meeting_end.isoformat(),
-                        "score": self._calculate_slot_score(slot_start, priority, work_start, work_end),
-                        "day_of_week": slot_start.strftime("%A"),
-                        "formatted_time": f"{slot_start.strftime('%A, %B %d at %I:%M %p')} - {meeting_end.strftime('%I:%M %p')}"
-                    })
+                common_slots = new_common_slots
             
-            # Sort by score (higher is better) and limit suggestions
-            common_slots.sort(key=lambda x: x["score"], reverse=True)
-            suggested_slots = common_slots[:max_suggestions]
+            # Score and rank slots based on preferences
+            scored_slots = []
+            for slot in common_slots[:max_suggestions * 2]:  # Get more to rank
+                score = self._score_time_slot(slot, meeting_requirements)
+                scored_slots.append((slot, score))
             
-            # Create reasoning
-            reasoning = f"""
-Analyzed availability for {len(authenticated_participants)} authenticated participants.
-Found {len(common_slots)} potential time slots.
-Prioritized based on:
-- Meeting priority: {priority}
-- Work hours: {work_start}:00 - {work_end}:00
-- Buffer time: {buffer_time} minutes
-- Participant preferences
-
-Top {len(suggested_slots)} recommendations selected.
-            """.strip()
+            # Sort by score and take top suggestions
+            scored_slots.sort(key=lambda x: x[1], reverse=True)
+            suggested_slots = [slot for slot, score in scored_slots[:max_suggestions]]
+            
+            reasoning = f"Found {len(common_slots)} common free slots. Selected top {len(suggested_slots)} based on meeting priority, work hours, and participant preferences."
             
             return {
-                "success": True,
                 "suggested_slots": suggested_slots,
                 "reasoning": reasoning,
-                "total_slots_found": len(common_slots),
-                "authenticated_participants_count": len(authenticated_participants)
+                "total_analyzed": len(common_slots)
             }
             
         except Exception as e:
-            return {"success": False, "error": str(e)}
+            return {"error": str(e), "suggested_slots": []}
     
-    def _calculate_slot_score(self, slot_start: datetime, priority: str, 
-                              work_start: int, work_end: int) -> float:
-        """Calculate score for a meeting slot based on various factors"""
-        score = 100.0  # Base score
+    def _score_time_slot(self, slot: Dict[str, Any], requirements: Dict[str, Any]) -> float:
+        """Score a time slot based on various criteria"""
+        score = 0.0
+        start_time = datetime.fromisoformat(slot["start_time"])
         
-        # Time of day preference (prefer mid-morning or early afternoon)
-        hour = slot_start.hour
-        if 10 <= hour <= 11 or 14 <= hour <= 15:
-            score += 20
-        elif 9 <= hour <= 12 or 13 <= hour <= 16:
-            score += 10
+        # Time of day scoring (prefer mid-morning and early afternoon)
+        hour = start_time.hour
+        if 9 <= hour <= 11:  # Morning
+            score += 0.3
+        elif 13 <= hour <= 15:  # Early afternoon
+            score += 0.2
+        elif 8 <= hour <= 16:  # General work hours
+            score += 0.1
         
-        # Day of week preference (prefer Tuesday-Thursday)
-        day = slot_start.weekday()  # 0=Monday, 6=Sunday
-        if 1 <= day <= 3:  # Tuesday-Thursday
-            score += 15
-        elif day in [0, 4]:  # Monday, Friday
-            score += 5
+        # Day of week scoring (prefer Tuesday-Thursday)
+        weekday = start_time.weekday()
+        if weekday in [1, 2, 3]:  # Tue, Wed, Thu
+            score += 0.2
+        elif weekday in [0, 4]:  # Mon, Fri
+            score += 0.1
         
-        # Priority adjustment
-        if priority == "high":
-            # Prefer earlier in the week and day
-            score += (7 - day) * 5  # Earlier in week is better
-            if hour <= 12:
-                score += 10  # Morning preference for high priority
+        # Priority scoring
+        priority = requirements.get("priority", "medium")
+        if priority == "urgent":
+            # Earlier is better for urgent meetings
+            score += 0.3 if hour <= 12 else 0.1
         elif priority == "low":
-            # More flexible, prefer later slots
-            score += day * 2  # Later in week is fine
-            if hour >= 14:
-                score += 5  # Afternoon is fine for low priority
+            # Later in day is fine for low priority
+            score += 0.2 if hour >= 14 else 0.0
+        
+        # Avoid lunch time
+        if 12 <= hour <= 13:
+            score -= 0.2
         
         return score
     
     def _create_calendar_event(self, title: str, description: str, 
                                start_time: str, end_time: str,
-                               attendees: List[str], location: str = "", 
-                               organizer_email: str = None) -> Dict[str, Any]:
-        """Create a calendar event using multi-user authentication"""
+                               attendees: List[str], location: str = "") -> Dict[str, Any]:
+        """Create a calendar event"""
         try:
-            # Validate that organizer is authenticated
-            if organizer_email and not self.google_service.is_user_authenticated(organizer_email):
-                return {
-                    "success": False, 
-                    "error": f"Organizer '{organizer_email}' is not authenticated. Please authenticate first."
-                }
-            
             event = CalendarEvent(
                 title=title,
                 description=description,
@@ -614,31 +518,21 @@ Top {len(suggested_slots)} recommendations selected.
                 location=location
             )
             
-            # Create event using specified organizer
-            event_id = self.google_service.create_calendar_event(event, organizer_email)
+            event_id = self.google_service.create_calendar_event(event)
             
             return {
                 "success": True,
                 "event_id": event_id,
-                "message": f"Calendar event created successfully by {organizer_email or 'default user'}",
-                "organizer": organizer_email
+                "message": "Calendar event created successfully"
             }
             
         except Exception as e:
             return {"success": False, "error": str(e)}
     
     def _send_meeting_email(self, to: List[str], subject: str, body: str,
-                            html_body: str = "", email_type: str = "proposal",
-                            sender_email: str = None) -> Dict[str, Any]:
-        """Send meeting-related email from specified authenticated user"""
+                            html_body: str = "", email_type: str = "proposal") -> Dict[str, Any]:
+        """Send meeting-related email"""
         try:
-            # Validate that sender is authenticated
-            if sender_email and not self.google_service.is_user_authenticated(sender_email):
-                return {
-                    "success": False,
-                    "error": f"Sender '{sender_email}' is not authenticated. Please authenticate first."
-                }
-            
             email_message = EmailMessage(
                 to=to,
                 subject=subject,
@@ -646,35 +540,26 @@ Top {len(suggested_slots)} recommendations selected.
                 html_body=html_body if html_body else None
             )
             
-            # Send email from specified sender
-            success = self.google_service.send_email(email_message, sender_email)
+            success = self.google_service.send_email(email_message)
             
             return {
                 "success": success,
-                "message": f"Email {email_type} sent successfully from {sender_email or 'default user'}" if success else "Failed to send email",
-                "email_type": email_type,
-                "sender": sender_email
+                "message": f"Email {email_type} sent successfully" if success else "Failed to send email",
+                "email_type": email_type
             }
             
         except Exception as e:
             return {"success": False, "error": str(e)}
     
     def _check_email_responses(self, proposal_id: str, query: str = "", 
-                               max_results: int = 10, user_email: str = None) -> Dict[str, Any]:
-        """Check for email responses from specified authenticated user's inbox"""
+                               max_results: int = 10) -> Dict[str, Any]:
+        """Check for email responses to meeting proposals"""
         try:
-            # Validate that user is authenticated
-            if user_email and not self.google_service.is_user_authenticated(user_email):
-                return {
-                    "success": False,
-                    "error": f"User '{user_email}' is not authenticated. Please authenticate first."
-                }
-            
             # Search for emails related to the proposal
             if not query:
                 query = f"meeting proposal {proposal_id}"
             
-            emails = self.google_service.get_recent_emails(query, max_results, user_email)
+            emails = self.google_service.get_recent_emails(query, max_results)
             
             # Parse responses for confirmations/rejections
             responses = []
@@ -691,8 +576,7 @@ Top {len(suggested_slots)} recommendations selected.
             return {
                 "success": True,
                 "responses": responses,
-                "total_found": len(emails),
-                "checked_inbox": user_email
+                "total_found": len(emails)
             }
             
         except Exception as e:
@@ -713,23 +597,16 @@ Top {len(suggested_slots)} recommendations selected.
             return "unclear"
     
     def _create_system_message(self, user_preferences: Optional[UserPreferences]) -> str:
-        """Create system message for the agent with multi-user awareness"""
+        """Create system message for the agent"""
         prefs = user_preferences or UserPreferences()
         
-        return f"""You are SchedulAI, an intelligent meeting scheduling agent with multi-user authentication support.
+        return f"""You are SchedulAI, an intelligent meeting scheduling agent. Your job is to:
 
-Your capabilities:
 1. Analyze meeting requests and participant availability
-2. Access calendars of authenticated users only 
+2. Use available tools to gather calendar information
 3. Suggest optimal meeting times based on multiple factors
-4. Handle email communications from specific authenticated users
-5. Create calendar events through authenticated organizers
-
-Multi-User Authentication Rules:
-- Only authenticated users can access their calendar data
-- External/non-authenticated users will show empty availability
-- Always specify which authenticated user should perform calendar/email operations
-- Use organizer's credentials for creating events and sending emails
+4. Handle email communications professionally
+5. Create calendar events when meetings are confirmed
 
 Key scheduling principles:
 - Work hours: {prefs.work_start_hour}:00 - {prefs.work_end_hour}:00
@@ -742,24 +619,23 @@ When scheduling:
 - Medium priority: Balance convenience and timing
 - Low priority: Optimize for participant convenience
 
-CRITICAL: Always start by checking authenticated users, then specify which user should perform each action.
 Always explain your reasoning and be proactive in resolving conflicts.
 Use the available tools systematically to gather data and execute actions."""
     
     def _create_meeting_request_message(self, meeting_request: MeetingRequest) -> str:
-        """Create user message describing the meeting request with multi-user context"""
+        """Create user message describing the meeting request"""
         organizer = f"{meeting_request.organizer.name} ({meeting_request.organizer.email})"
         participants = [f"{p.name} ({p.email})" for p in meeting_request.participants]
         all_attendees = [organizer] + participants
         
-        return f"""Please schedule the following meeting with multi-user authentication support:
+        return f"""Please schedule the following meeting:
 
 Title: {meeting_request.title}
 Description: {meeting_request.description}
 Duration: {meeting_request.duration_minutes} minutes
 Priority: {meeting_request.priority.value}
 
-Organizer: {organizer} [Meeting requester - use their credentials for calendar/email operations]
+Organizer: {organizer} [Meeting requester - their preferences take priority]
 Additional Participants: {', '.join(participants) if participants else 'None'}
 Total Attendees: {len(all_attendees)}
 
@@ -767,28 +643,19 @@ Additional requirements:
 - Preferred days: {', '.join(meeting_request.preferred_days) if meeting_request.preferred_days else 'Any weekday'}
 - Buffer time: {meeting_request.buffer_time_minutes} minutes
 
-Multi-User Instructions:
-1. First, check which users are authenticated
-2. Verify organizer ({meeting_request.organizer.email}) is authenticated
-3. Check availability for all attendees (authenticated users will show real data)
-4. Use organizer's credentials for creating events and sending emails
-5. Consider that external participants may not show availability data
-
 Scheduling hierarchy:
 1. Organizer preferences have highest priority
-2. Find slots that work for ALL authenticated attendees
+2. Find slots that work for ALL attendees
 3. Optimize based on meeting priority and work hours
 
 Please:
-1. Check authenticated users first
-2. Check availability for all {len(all_attendees)} attendees
-3. Analyze and suggest the best 3 time slots that work for authenticated participants
-4. Create calendar event using organizer's credentials
-5. Send meeting proposal emails from organizer's account
-6. Explain your reasoning and any limitations due to authentication"""
+1. Check availability for all {len(all_attendees)} attendees for the next 7 days
+2. Analyze and suggest the best 3 time slots that work for everyone
+3. Send meeting proposal emails to all participants (including organizer)
+4. Explain your reasoning for the suggested times"""
 
     def confirm_meeting(self, proposal_id: str, slot_index: int) -> Dict[str, Any]:
-        """Confirm a meeting proposal with multi-user support"""
+        """Confirm a meeting proposal"""
         if proposal_id not in self.proposals:
             return {"success": False, "error": "Proposal not found"}
         
@@ -800,33 +667,23 @@ Please:
         
         # Get all attendee emails (organizer + participants)
         all_attendees = proposal.meeting_request.get_all_emails()
-        organizer_email = proposal.meeting_request.organizer.email
         
-        # Verify organizer is authenticated
-        if not self.google_service.is_user_authenticated(organizer_email):
-            return {
-                "success": False, 
-                "error": f"Organizer '{organizer_email}' is not authenticated. Cannot create calendar event."
-            }
-        
-        # Create calendar event using organizer's credentials
+        # Create calendar event
         event_result = self._create_calendar_event(
             title=proposal.meeting_request.title,
             description=proposal.meeting_request.description,
             start_time=selected_slot.start_time.isoformat(),
             end_time=selected_slot.end_time.isoformat(),
-            attendees=all_attendees,
-            organizer_email=organizer_email
+            attendees=all_attendees
         )
         
         if event_result["success"]:
-            # Send confirmation emails from organizer's account
+            # Send confirmation emails to all attendees
             self._send_meeting_email(
                 to=all_attendees,
                 subject=f"Meeting Confirmed: {proposal.meeting_request.title}",
                 body=f"Your meeting '{proposal.meeting_request.title}' has been confirmed for {selected_slot.start_time.strftime('%A, %B %d at %I:%M %p')}.\n\nOrganizer: {proposal.meeting_request.organizer.name}\nAttendees: {len(all_attendees)} total",
-                email_type="confirmation",
-                sender_email=organizer_email
+                email_type="confirmation"
             )
             
             # Update proposal status
@@ -840,8 +697,7 @@ Please:
                     "end_time": selected_slot.end_time.isoformat()
                 },
                 "total_attendees": len(all_attendees),
-                "organizer": organizer_email,
-                "organizer_authenticated": True
+                "organizer": proposal.meeting_request.organizer.email
             }
         else:
             return {"success": False, "error": event_result["error"]} 
