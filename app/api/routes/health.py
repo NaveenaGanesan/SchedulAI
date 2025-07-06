@@ -32,7 +32,8 @@ async def root():
             "proposals": "/meetings/proposal/{proposal_id}",
             "confirm": "/meetings/confirm/{proposal_id}",
             "upcoming": "/calendar/upcoming",
-            "availability": "/calendar/availability",
+            "availability": "/calendar/availability", 
+            "authenticated_user": "/calendar/authenticated-user",
             "tools": "/meetings/agent-tools",
             "docs": "/docs"
         }

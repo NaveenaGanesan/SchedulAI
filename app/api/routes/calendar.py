@@ -1,27 +1,92 @@
 """
-Calendar-related routes
+Calendar API Routes
 
-Contains endpoints for calendar operations, availability checking, and event management.
+Simple calendar endpoints:
+1. Get current user email from Google APIs
+2. Get upcoming meetings (with optional email parameter)
+3. Check availability for participants
+
+No authentication validation - uses existing Google credentials directly.
 """
 
-from fastapi import APIRouter, HTTPException, Depends, status
 from datetime import datetime, timedelta
-from typing import List
+from typing import Optional
+
+from fastapi import APIRouter, Depends, HTTPException, status
 
 from app.api.dependencies import get_agent_service
-from app.models.api import CalendarAvailabilityResponse
 from app.core.logging import get_logger
 
 logger = get_logger(__name__)
 router = APIRouter()
 
 
+@router.get("/current-user")
+async def get_current_user():
+    """
+    Get the current user's email address from Google APIs
+    
+    Calls Google OAuth2 API to get the authenticated user's information.
+    """
+    try:
+        from googleapiclient.discovery import build
+        from google.oauth2.credentials import Credentials
+        import pickle
+        import os
+        
+        # Load credentials from token file
+        token_file = "token.pickle"
+        if not os.path.exists(token_file):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="No credentials found. Please run authentication first."
+            )
+        
+        with open(token_file, 'rb') as token:
+            credentials = pickle.load(token)
+        
+        # Get user info from Google
+        service = build('oauth2', 'v2', credentials=credentials)
+        user_info = service.userinfo().get().execute()
+        
+        email = user_info.get('email', '')
+        name = user_info.get('name', '')
+        
+        if not email:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Could not retrieve user email from Google"
+            )
+        
+        return {
+            "email": email,
+            "name": name,
+            "message": f"Current user: {name} ({email})"
+        }
+        
+    except Exception as e:
+        if isinstance(e, HTTPException):
+            raise e
+        logger.error(f"Error getting current user: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to get current user: {str(e)}"
+        )
+
+
 @router.get("/upcoming")
 async def get_upcoming_meetings(
+    email: Optional[str] = None,  # Optional: defaults to current user
     days_ahead: int = 7,
     agent = Depends(get_agent_service)
 ):
-    """Get upcoming meetings from calendar"""
+    """
+    Get upcoming meetings from calendar
+    
+    **Parameters:**
+    - email: Optional email address (if not provided, gets current user from /current-user)
+    - days_ahead: Number of days ahead to fetch (1-30, default: 7)
+    """
     
     try:
         if days_ahead < 1 or days_ahead > 30:
@@ -30,10 +95,41 @@ async def get_upcoming_meetings(
                 detail="days_ahead must be between 1 and 30"
             )
         
+        # Get current user email if not provided
+        if not email:
+            from googleapiclient.discovery import build
+            from google.oauth2.credentials import Credentials
+            import pickle
+            import os
+            
+            # Load credentials and get current user
+            token_file = "token.pickle"
+            if not os.path.exists(token_file):
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="No credentials found. Please run authentication first."
+                )
+            
+            with open(token_file, 'rb') as token:
+                credentials = pickle.load(token)
+            
+            service = build('oauth2', 'v2', credentials=credentials)
+            user_info = service.userinfo().get().execute()
+            email = user_info.get('email', '')
+            
+            if not email:
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail="Could not get current user email"
+                )
+        
+        logger.info(f"Fetching upcoming meetings for: {email}")
+        
         start_date = datetime.now()
         end_date = start_date.replace(hour=23, minute=59, second=59) + timedelta(days=days_ahead)
         
-        events = agent.google_service.get_calendar_events(start_date, end_date)
+        # Call Google Calendar API directly
+        events = agent.google_service.get_calendar_events(start_date, end_date, email)
         
         meetings = [
             {
@@ -52,6 +148,7 @@ async def get_upcoming_meetings(
         return {
             "meetings": meetings,
             "total_count": len(meetings),
+            "user_email": email,
             "date_range": {
                 "start": start_date.isoformat(),
                 "end": end_date.isoformat(),
@@ -69,14 +166,23 @@ async def get_upcoming_meetings(
         )
 
 
-@router.get("/availability", response_model=CalendarAvailabilityResponse)
+@router.get("/availability")
 async def get_calendar_availability(
     participant_emails: str,  # Comma-separated emails
     days_ahead: int = 7,
     duration_minutes: int = 30,
     agent = Depends(get_agent_service)
 ):
-    """Check calendar availability for specified participants"""
+    """
+    Check calendar availability for participants
+    
+    **Parameters:**
+    - participant_emails: Comma-separated email addresses (e.g., "user1@gmail.com,user2@gmail.com")
+    - days_ahead: Number of days ahead to check (1-30, default: 7)
+    - duration_minutes: Meeting duration in minutes (15-480, default: 30)
+    
+    Calls Google Calendar APIs directly for availability data.
+    """
     
     try:
         if days_ahead < 1 or days_ahead > 30:
@@ -99,13 +205,13 @@ async def get_calendar_availability(
                 detail="At least one participant email is required"
             )
         
-        logger.info(f"Checking availability for {len(emails)} participants over {days_ahead} days")
+        logger.info(f"Checking availability for {len(emails)} participants: {emails}")
         
         # Calculate date range
         start_date = datetime.now()
         end_date = start_date + timedelta(days=days_ahead)
         
-        # Get availability data
+        # Get availability data directly from Google Calendar
         availability_result = agent._get_calendar_availability(
             emails, 
             start_date.isoformat(), 
@@ -114,86 +220,28 @@ async def get_calendar_availability(
         )
         
         if not availability_result.get("success", False):
-            return CalendarAvailabilityResponse(
-                success=False,
-                error=availability_result.get("error", "Failed to fetch availability")
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=availability_result.get("error", "Failed to fetch availability")
             )
         
-        return CalendarAvailabilityResponse(
-            success=True,
-            availability_data=availability_result.get("availability_data", [])
-        )
+        return {
+            "success": True,
+            "availability_data": availability_result.get("availability_data", []),
+            "participants": emails,
+            "duration_minutes": duration_minutes,
+            "date_range": {
+                "start": start_date.isoformat(),
+                "end": end_date.isoformat(),
+                "days": days_ahead
+            }
+        }
         
     except Exception as e:
         if isinstance(e, HTTPException):
             raise e
         logger.error(f"Error checking calendar availability: {str(e)}")
-        return CalendarAvailabilityResponse(
-            success=False,
-            error=f"Failed to check availability: {str(e)}"
-        )
-
-
-@router.post("/events")
-async def create_calendar_event(
-    title: str,
-    description: str = "",
-    start_time: str = "",
-    end_time: str = "",
-    attendees: List[str] = [],
-    location: str = "",
-    agent = Depends(get_agent_service)
-):
-    """Create a new calendar event"""
-    
-    try:
-        if not all([title, start_time, end_time]):
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="title, start_time, and end_time are required"
-            )
-        
-        # Validate datetime formats
-        try:
-            start_dt = datetime.fromisoformat(start_time)
-            end_dt = datetime.fromisoformat(end_time)
-        except ValueError:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Invalid datetime format. Use ISO format (YYYY-MM-DDTHH:MM:SS)"
-            )
-        
-        if start_dt >= end_dt:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="start_time must be before end_time"
-            )
-        
-        logger.info(f"Creating calendar event: {title}")
-        
-        result = agent._create_calendar_event(
-            title=title,
-            description=description,
-            start_time=start_time,
-            end_time=end_time,
-            attendees=attendees,
-            location=location
-        )
-        
-        if not result.get("success", False):
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=result.get("error", "Failed to create calendar event")
-            )
-        
-        logger.info(f"Calendar event created successfully: {result.get('event_id')}")
-        return result
-        
-    except Exception as e:
-        if isinstance(e, HTTPException):
-            raise e
-        logger.error(f"Error creating calendar event: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to create calendar event: {str(e)}"
+            detail=f"Failed to check availability: {str(e)}"
         ) 

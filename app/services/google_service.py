@@ -10,6 +10,8 @@ from datetime import datetime, timedelta
 from typing import List, Dict, Any, Optional
 import email.mime.text as mime_text
 import base64
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
 
 from google.auth.transport.requests import Request
 from google_auth_oauthlib.flow import InstalledAppFlow
@@ -102,45 +104,57 @@ class GoogleService:
     # Calendar Methods
     def get_calendar_availability(self, participant_emails: List[str], 
                                 start_date: datetime, end_date: datetime) -> List[AvailabilityResponse]:
-        """Get availability for multiple participants"""
+        """Get availability for participants using main credentials"""
         try:
             availability_responses = []
             
             for email in participant_emails:
-                # Get busy times for this participant
-                body = {
-                    'timeMin': start_date.isoformat(),
-                    'timeMax': end_date.isoformat(),
-                    'items': [{'id': email}]
-                }
+                logger.debug(f"Checking availability for: {email}")
                 
-                try:
-                    freebusy_result = self.calendar_service.freebusy().query(body=body).execute()
-                    busy_times = freebusy_result['calendars'].get(email, {}).get('busy', [])
+                # For the authenticated user, get their calendar data
+                # For external users, return empty availability
+                if email == self.get_authenticated_email():
+                    # Get busy times for authenticated user
+                    body = {
+                        'timeMin': start_date.isoformat() + 'Z' if not start_date.tzinfo else start_date.isoformat(),
+                        'timeMax': end_date.isoformat() + 'Z' if not end_date.tzinfo else end_date.isoformat(),
+                        'items': [{'id': 'primary'}]  # Use primary calendar
+                    }
                     
-                    # Convert busy times to TimeSlot objects
-                    busy_slots = []
-                    for busy_period in busy_times:
-                        start_time = datetime.fromisoformat(busy_period['start'].replace('Z', '+00:00'))
-                        end_time = datetime.fromisoformat(busy_period['end'].replace('Z', '+00:00'))
-                        busy_slots.append(TimeSlot(
-                            start_time=start_time,
-                            end_time=end_time,
-                            available=False
+                    try:
+                        freebusy_result = self.calendar_service.freebusy().query(body=body).execute()
+                        busy_times = freebusy_result['calendars'].get('primary', {}).get('busy', [])
+                        
+                        # Convert busy times to TimeSlot objects
+                        busy_slots = []
+                        for busy_period in busy_times:
+                            start_time = datetime.fromisoformat(busy_period['start'].replace('Z', '+00:00'))
+                            end_time = datetime.fromisoformat(busy_period['end'].replace('Z', '+00:00'))
+                            busy_slots.append(TimeSlot(
+                                start_time=start_time,
+                                end_time=end_time,
+                                available=False
+                            ))
+                        
+                        # Calculate free slots
+                        free_slots = self._calculate_free_slots(start_date, end_date, busy_slots)
+                        
+                        availability_responses.append(AvailabilityResponse(
+                            participant_email=email,
+                            free_slots=free_slots,
+                            busy_slots=busy_slots
                         ))
-                    
-                    # Calculate free slots
-                    free_slots = self._calculate_free_slots(start_date, end_date, busy_slots)
-                    
-                    availability_responses.append(AvailabilityResponse(
-                        participant_email=email,
-                        free_slots=free_slots,
-                        busy_slots=busy_slots
-                    ))
-                    
-                except HttpError as e:
-                    print(f"Error getting availability for {email}: {e}")
-                    # Add empty availability for this participant
+                        
+                    except HttpError as e:
+                        logger.error(f"Error getting availability for {email}: {e}")
+                        availability_responses.append(AvailabilityResponse(
+                            participant_email=email,
+                            free_slots=[],
+                            busy_slots=[]
+                        ))
+                else:
+                    # External user - return empty availability
+                    logger.info(f"External user {email} - returning empty availability")
                     availability_responses.append(AvailabilityResponse(
                         participant_email=email,
                         free_slots=[],
@@ -150,7 +164,7 @@ class GoogleService:
             return availability_responses
             
         except HttpError as error:
-            print(f'Calendar API error: {error}')
+            logger.error(f'Calendar API error: {error}')
             return []
     
     def _calculate_free_slots(self, start_date: datetime, end_date: datetime, 
@@ -158,12 +172,37 @@ class GoogleService:
         """Calculate free time slots from busy periods"""
         free_slots = []
         
+        # Ensure all datetime objects have the same timezone info
+        if start_date.tzinfo is None:
+            start_date = start_date.replace(tzinfo=None)
+        if end_date.tzinfo is None:
+            end_date = end_date.replace(tzinfo=None)
+        
+        # Normalize busy slots to match timezone info
+        normalized_busy_slots = []
+        for slot in busy_slots:
+            start_time = slot.start_time
+            end_time = slot.end_time
+            
+            # Convert timezone-aware to naive if our dates are naive
+            if start_date.tzinfo is None:
+                if start_time.tzinfo is not None:
+                    start_time = start_time.replace(tzinfo=None)
+                if end_time.tzinfo is not None:
+                    end_time = end_time.replace(tzinfo=None)
+            
+            normalized_busy_slots.append(TimeSlot(
+                start_time=start_time,
+                end_time=end_time,
+                available=False
+            ))
+        
         # Sort busy slots by start time
-        busy_slots.sort(key=lambda x: x.start_time)
+        normalized_busy_slots.sort(key=lambda x: x.start_time)
         
         current_time = start_date
         
-        for busy_slot in busy_slots:
+        for busy_slot in normalized_busy_slots:
             # If there's a gap before this busy slot, it's free time
             if current_time < busy_slot.start_time:
                 free_slots.append(TimeSlot(
@@ -224,13 +263,20 @@ class GoogleService:
             print(f'Error creating calendar event: {error}')
             return None
     
-    def get_calendar_events(self, start_date: datetime, end_date: datetime) -> List[CalendarEvent]:
-        """Get calendar events in date range"""
+    def get_calendar_events(self, start_date: datetime, end_date: datetime, user_email: str = None) -> List[CalendarEvent]:
+        """Get calendar events in date range (uses main authenticated user's calendar)"""
         try:
-            time_min = start_date.isoformat()
-            time_max = end_date.isoformat()
+            # Always use the main calendar service (authenticated user)
+            calendar_service = self.calendar_service
             
-            events_result = self.calendar_service.events().list(
+            # Ensure proper timezone formatting
+            time_min = start_date.isoformat() + 'Z' if not start_date.tzinfo else start_date.isoformat()
+            time_max = end_date.isoformat() + 'Z' if not end_date.tzinfo else end_date.isoformat()
+            
+            current_user = self.get_authenticated_email()
+            logger.debug(f"Fetching calendar events from {time_min} to {time_max} for user: {current_user}")
+            
+            events_result = calendar_service.events().list(
                 calendarId='primary',
                 timeMin=time_min,
                 timeMax=time_max,
@@ -266,7 +312,7 @@ class GoogleService:
             return calendar_events
             
         except HttpError as error:
-            print(f'Error fetching calendar events: {error}')
+            logger.error(f'Error fetching calendar events: {error}')
             return []
     
     # Gmail Methods
@@ -274,17 +320,17 @@ class GoogleService:
         """Send email using Gmail API"""
         try:
             # Create message
-            message = MimeMultipart('alternative')
+            message = MIMEMultipart('alternative')
             message['To'] = ', '.join(email_message.to)
             message['Subject'] = email_message.subject
             
             # Add plain text part
-            text_part = MimeText(email_message.body, 'plain')
+            text_part = MIMEText(email_message.body, 'plain')
             message.attach(text_part)
             
             # Add HTML part if provided
             if email_message.html_body:
-                html_part = MimeText(email_message.html_body, 'html')
+                html_part = MIMEText(email_message.html_body, 'html')
                 message.attach(html_part)
             
             # Encode message
@@ -360,6 +406,29 @@ class GoogleService:
             print(f'Error fetching emails: {error}')
             return []
     
+    def get_authenticated_email(self) -> str:
+        """Get the email of the currently authenticated user (backwards compatibility)"""
+        try:
+            profile = self.gmail_service.users().getProfile(userId='me').execute()
+            return profile.get('emailAddress', '')
+        except Exception as e:
+            logger.error(f"Failed to get authenticated email: {e}")
+            return ''
+    
+    def get_user_service(self, email: str, service_type: str = 'calendar'):
+        """Get Google API service for a specific authenticated user"""
+        try:
+            if service_type == 'calendar':
+                return build('calendar', 'v3', credentials=self.credentials)
+            elif service_type == 'gmail':
+                return build('gmail', 'v1', credentials=self.credentials)
+            else:
+                logger.error(f"Unknown service type: {service_type}")
+                return None
+        except Exception as e:
+            logger.error(f"Failed to build {service_type} service for {email}: {e}")
+            return None
+    
     def validate_services(self) -> Dict[str, bool]:
         """Validate that both services are working"""
         calendar_working = False
@@ -370,14 +439,14 @@ class GoogleService:
             self.calendar_service.calendarList().list().execute()
             calendar_working = True
         except Exception as e:
-            print(f"Calendar API validation failed: {e}")
+            logger.error(f"Calendar API validation failed: {e}")
         
         try:
             # Test Gmail API
             self.gmail_service.users().getProfile(userId='me').execute()
             gmail_working = True
         except Exception as e:
-            print(f"Gmail API validation failed: {e}")
+            logger.error(f"Gmail API validation failed: {e}")
         
         return {
             'calendar': calendar_working,
